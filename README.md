@@ -14,6 +14,6 @@ As example to assemble and test an RNA-Seq workflow we will use previously publi
 
 ## Table of contents
 1. [**Download raw data**](https://github.com/eugeniozoni/RNA_Seq/wiki/Download-the-raw-data)
-2. test
-
+2. [**Steps for data processing**]()
+ 
 
