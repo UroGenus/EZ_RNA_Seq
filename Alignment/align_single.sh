@@ -1,0 +1,70 @@
+#!/bin/bash
+#SBATCH --mail-user=eugenio.zoni@dbmr.unibe.ch
+#SBATCH --mail-type=end,fail
+#SBATCH --job-name="align"
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=1
+#SBATCH --time=12:00:00
+#SBATCH --mem-per-cpu=8G
+#SBATCH --array=1-36
+
+HISAT_INDEX=$HOME/RNA_HOME/RNA_REFS_DIR/Homo_sapiens.GRCh38.dna_sm.primary_assembly
+
+FASTQ_DIR=$HOME/bladder_fastq
+HISAT_DIR=$HOME/bladder_sam
+
+#load modules
+module add vital-it/7
+module add UHTS/Aligner/hisat/2.1.0
+module add UHTS/Analysis/samtools/1.10
+
+case "$SLURM_ARRAY_TASK_ID" in 
+
+1) SAMPLE="SRR6050250" ;;
+2) SAMPLE="SRR6050251" ;;
+3) SAMPLE="SRR6050252" ;;
+4) SAMPLE="SRR6050253" ;;
+5) SAMPLE="SRR6050254" ;;
+6) SAMPLE="SRR6050255" ;;
+7) SAMPLE="SRR6050256" ;;
+8) SAMPLE="SRR6050257" ;;
+9) SAMPLE="SRR6050258" ;;
+10) SAMPLE="SRR6050259" ;;
+11) SAMPLE="SRR6050260" ;;
+12) SAMPLE="SRR6050261" ;;
+13) SAMPLE="SRR6050262" ;;
+14) SAMPLE="SRR6050263" ;;
+15) SAMPLE="SRR6050264" ;;
+16) SAMPLE="SRR6050265" ;;
+17) SAMPLE="SRR6050266" ;;
+18) SAMPLE="SRR6050267" ;;
+19) SAMPLE="SRR6050268" ;;
+20) SAMPLE="SRR6050269" ;;
+21) SAMPLE="SRR6050270" ;;
+22) SAMPLE="SRR6050271" ;;
+23) SAMPLE="SRR6050272" ;;
+24) SAMPLE="SRR6050273" ;;
+25) SAMPLE="SRR6050274" ;;
+26) SAMPLE="SRR6050275" ;;
+27) SAMPLE="SRR6050276" ;;
+28) SAMPLE="SRR6050277" ;;
+29) SAMPLE="SRR6050278" ;;
+30) SAMPLE="SRR6050279" ;;
+31) SAMPLE="SRR6050280" ;;
+32) SAMPLE="SRR6050281" ;;
+33) SAMPLE="SRR6050282" ;;
+34) SAMPLE="SRR6050283" ;;
+35) SAMPLE="SRR6050284" ;;
+36) SAMPLE="SRR6050285" ;;
+
+esac
+
+echo $SAMPLE
+echo ${SAMPLE}
+
+hisat2 -p 8 -t --rg-id $SAMPLE -x $HISAT_INDEX --dta --rna-strandness R -U $FASTQ_DIR/${SAMPLE}.fastq -S $HISAT_DIR/$SAMPLE.sam
+
+samtools view -S -b $HISAT_DIR/$SAMPLE.sam  > $HISAT_DIR/$SAMPLE.bam
+
+samtools sort $HISAT_DIR/$SAMPLE.sam -o $HISAT_DIR/bam/$SAMPLE.sorted.bam
