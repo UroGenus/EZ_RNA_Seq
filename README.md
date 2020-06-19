@@ -16,6 +16,6 @@ As example to assemble and test an RNA-Seq workflow we will use previously publi
 ## Table of contents
 1. [**Download raw data**](https://github.com/eugeniozoni/RNA_Seq/wiki/Download-raw-data)
 2. [**Steps for data processing**](https://github.com/eugeniozoni/RNA_Seq/wiki/Steps-for-data-processing)
-3. [**Differential expression analysis**]()
+3. [**Differential expression analysis**](https://github.com/eugeniozoni/RNA_Seq/wiki/Differential-expression-analysis)
  
 
