@@ -1,0 +1,654 @@
+---
+title: "Bladder cancer organoids RNAseq analysis"
+author:
+  name: Eugenio Zoni
+  email: eugenio.zoni@dbmr.unibe.ch
+date: "February 3, 2020"
+output:
+  html_document:
+    df_print: paged
+    number_sections: no
+    toc: yes
+    toc_float: yes
+ editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, echo=FALSE, message=FALSE, results="hide"}
+knitr::opts_chunk$set(cache = FALSE, error = FALSE)
+```
+
+##Objective
+
+Analyze RNAseq data starting from un-normalized counts from GSE103990.
+The data can be retrieved from [here](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE103990).
+
+## Load libraries
+```{r , warning=FALSE, message=FALSE}
+library(reshape2)
+library(ggplot2)
+library(DESeq2)
+library(apeglm)
+library(ashr)
+library(vsn)
+library(pheatmap)
+library(RColorBrewer)
+library(EnhancedVolcano)
+#library(org.Mm.eg.db)
+library(clusterProfiler)
+library(biomaRt)
+library(pathview)
+library(dplyr)
+library(tidyverse)
+
+getwd()
+
+```
+
+## Import data
+
+DESeq2 needs un-normalized counts to functions. The raw data downloaded from SRA have been kindly alligned by Daniel Sanchez and Tural Yarahmadov, Visceral Surgery, DBMR. The file `GSE111291_counts_EZ.csv` with the counts `GSE111291_exp_info.csv` with the experimental information are imported in R using `read.csv`.
+
+IMPORTANT: we use the function `data.matrix` as we want to have a numeric matrix and we will anyway remove the first columns with information different from the counts. 
+```{r , echo=FALSE, warning=FALSE, message=FALSE}
+cts <- data.matrix(read.delim("GSE103990_featurecounts.txt",row.names="Geneid"))
+coldata <- read.csv("SraRunTable_GSE103990.csv", row.names=1)
+coldata <- coldata[,c("Cell_type", "LibraryLayout", "Library_Cell", "passages", "tumor_grade", "tumor_stage")]
+coldata$LibraryLayout<-as.factor(coldata$LibraryLayout)
+coldata$Cell_type<-as.factor(coldata$Cell_type)
+coldata$Library_Cell<-as.factor(coldata$Library_Cell)
+levels(coldata$Cell_type)
+levels(coldata$LibraryLayout)
+levels(coldata$Library_Cell)
+```
+
+We check by printing the `coldata` object and the `cts` matrix and remove the columns that are not necessary. We remove the SRR6050286 sample as the file was basically empty. We also generate a tibble that we will use later.
+```{r}
+coldata
+coldata<-coldata[!rownames(coldata) =="SRR6050286",]
+coldata
+coldata_tibble <- coldata %>% 
+  rownames_to_column(var="samplename") %>% 
+  as_tibble()
+```
+
+```{r}
+head(cts,2)
+cts<-cts[,-1:-5]
+head(cts,2)
+```
+
+First we check that row names in `coldata` and column names in `cts` are the same. This is a requirment for the next steps and assure that there is a unique correspondence between sample names between the file with the counts and the file with the experiemntal data.
+```{r , warning=FALSE, message=FALSE}
+all(rownames(coldata) %in% colnames(cts))
+all(rownames(coldata) == colnames(cts))
+```
+
+## Quality Check
+
+### Build the DESeqDataSet
+
+Using the *coldata* and the *cts* we can build the *DESeqDataSet*. We do this by using the function `DESeqDataSetFromMatrix` function.
+```{r, warning=FALSE, message=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ Cell_type)
+dds
+```
+
+### Pre-filtering of the data
+
+Data are pre-filtered by eliminating reads that are <=10.
+```{r, warning=FALSE, message=FALSE}
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+```
+
+### Data transformation and visualization
+
+To run DE analysis above, we operate on raw counts. However, to visualize the data or clustering it is useful to work on transformed count data. The data can be transformed by two functions `vst` and `rlog`. `vst` is variance stabilizing transformation, while `rlog` is regularized log. The `rlog` is slower if there are many samples. Both functions have an argument `blind` that is by defualt set to `TRUE` and results in the re-estimation of the dispesion. Data can also be transofrmed by just applying *log2(n + 1)* and this is done by `normTransform` function.
+However, blind dispersion estimation is not the appropriate choice if one expects that many or the majority of genes will have large differences in counts explainable by the experimental design, and one wishes to transform the data for downstream analysis. By setting `blind` to `FALSE`, the dispersions already estimated will be used to perform transformations, or if not present, they will be estimated using the current design formula.
+
+**IMPORTANT :** if you change relevant parts of the code you might want to set `cache=FALSE`. Also, this can be run again using a different LFC estimate (see below).
+```{r, warning=FALSE, message=FALSE, cache=TRUE}
+vsd <- vst(dds, blind=FALSE)
+rld <- rlog(dds, blind=FALSE)
+ntd <- normTransform(dds)
+head(assay(vsd), 3)
+head(assay(rld), 3)
+head(assay(ntd), 3)
+```
+
+The result of the transformation can be visualized by plotting the standard deviation against the mean of the `normTransform` or `vst` or `rlog` function.
+```{r, warning=FALSE, message=FALSE}
+meanSdPlot(assay(ntd))
+meanSdPlot(assay(vsd))
+meanSdPlot(assay(rld))
+```
+
+### Principal component analysis 
+
+We can show the separation among the samples by looking at 2D PC1 and PC2. By default the function uses the top 500 most variable genes. This can be changed by setting `ntop=` to another number.
+```{r}
+plotPCA(ntd, intgroup=c("Cell_type", "LibraryLayout"))
+plotPCA(vsd, intgroup=c("Cell_type", "LibraryLayout"))
+plotPCA(rld, intgroup=c("Cell_type", "LibraryLayout"))
+```
+
+### Hierarchical clustering
+
+Toghether with the PCA plot, these plots inform whether the data are of good quality and we have the green light to proceed to differential expression analysis.
+First we extract matrix/dataframe of numeric values as input from the rld object:
+```{r}
+### Extract the rlog matrix from the object
+rld_mat <- assay(rld)    ## assay() is function from the "SummarizedExperiment" package that was loaded when you loaded DESeq2
+vsd_mat <- assay(vsd)
+ntd_mat <- assay(ntd)
+```
+
+Then compute pairwise correlation between samples:
+```{r}
+### Compute pairwise correlation values
+rld_cor <- cor(rld_mat)    ## cor() is a base R function
+head(rld_cor)   ## check the output of cor(), make note of the rownames and colnames
+vsd_cor <- cor(vsd_mat)    
+head(vsd_cor)   
+ntd_cor <- cor(ntd_mat)    
+head(ntd_cor)   
+```
+
+Then plot the correlation:
+```{r}
+### Plot heatmap
+pheatmap(rld_cor)
+pheatmap(vsd_cor)
+pheatmap(ntd_cor)
+```
+
+### Heatmap of the sample-to-sample distances
+
+It is also usefull to visualize how the different traqnsformed data (`normTransform` or `vst` or `rlog`) are clustering together. This can be done using the `dist` function, and then by plotting a heatmap of the distances between samples calculated.
+```{r}
+sampleDists <- dist(t(assay(ntd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(ntd$Cell_type, ntd$LibraryLayout, sep="-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors,
+         main = "NTD")
+
+sampleDists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vsd$Cell_type, vsd$LibraryLayout, sep="-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors,
+         main = "VSD")
+
+sampleDists <- dist(t(assay(rld)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(rld$Cell_type, rld$LibraryLayout, sep="-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors,
+         main = "RLD")
+```
+
+### Heatmap of the count matrix
+
+It is instructive to look at the count matrix of the transformed data as a heatmap. This can be done for the `normTransform` or `vst` or `rlog`objects.
+```{r, warning=FALSE, message=FALSE}
+select <- order(rowMeans(counts(dds,normalized=FALSE)),
+                decreasing=TRUE)
+df <- as.data.frame(colData(dds)[,c("Cell_type","LibraryLayout", "tumor_grade", "tumor_stage")])
+pheatmap(assay(ntd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df, main = "NTD")
+
+pheatmap(assay(vsd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df, main = "VSD")
+
+pheatmap(assay(rld)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df, main = "rld")
+```
+
+
+## DE analysis - simple design
+
+The differential expression analysis is done by using the `DESeq` function, applied to the *dds* object. It is better to set a reference condition now, by specifiying the level of the factor `condition` that we want to compare to. We also use the `resultsNames` function to list the comparison executed by the `DESeq` function (in this case VS *Primary_tumor_NP*).
+
+**IMPORTANT :** if you change relevant parts of the code you might want to set `cache=FALSE`. 
+
+```{r, warning=FALSE, message=FALSE, cache=TRUE}
+dds$Cell_type <- relevel(dds$Cell_type, ref = "tumor")
+dds <- DESeq(dds)
+resultsNames(dds)
+```
+
+It is important to check the different steps performed by the function `DESeq` which we have called above. The plot of the dispersion VS the fitting model should inform whether the processing of the DESeq function is ok.
+```{r, warning=FALSE, message=FALSE, cache=TRUE}
+sizeFactors(dds) ## Check the size factors
+colSums(counts(dds)) ## Total number of raw counts per sample
+colSums(counts(dds, normalized=T)) ## Total number of normalized counts per sample
+plotDispEsts(dds) ## Plot dispersion estimates
+```
+
+We can retrieve the normalized counts and also generate a tibble which we will use later and add the gene symbol
+```{r, warning=FALSE, message=FALSE, cache=TRUE}
+normalized_counts <- counts(dds, normalized=TRUE)
+
+ensembl=useMart("ENSEMBL_MART_ENSEMBL")
+listDatasets(ensembl)
+ensembl=useDataset("hsapiens_gene_ensembl",mart=ensembl)
+listAttributes(ensembl)
+ensembl_and_entrez=getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "GO term accession"), values=rownames(normalized_counts), mart= ensembl)
+normalized_counts_df<-as.data.frame(normalized_counts)
+normalized_counts_df$gene_id=rownames(normalized_counts_df) 
+normalized_counts_df<-merge(normalized_counts_df, ensembl_and_entrez, by.x="gene_id", by.y="ensembl_gene_id", 
+                  all.x=TRUE, all.y=FALSE)
+
+write.table(normalized_counts_df, file="normalized_counts_GSE103990.txt", sep="\t", quote=F, col.names=NA)
+
+normalized_counts_df <- normalized_counts_df %>% 
+    as_tibble()
+```
+
+For Aracne analysis we can generate a transformed raw counts file, where we also include the gene names as above.
+```{r, warning=FALSE, message=FALSE, cache=TRUE}
+transformed_counts <- log2(cts+1)
+keep <- rowSums(transformed_counts) >= 10
+transformed_counts <- transformed_counts[keep,]
+
+ensembl=useMart("ENSEMBL_MART_ENSEMBL")
+listDatasets(ensembl)
+ensembl=useDataset("hsapiens_gene_ensembl",mart=ensembl)
+listAttributes(ensembl)
+ensembl_and_entrez=getBM(attributes=c("ensembl_gene_id", "hgnc_symbol", "go_id"), values=rownames(transformed_counts), mart= ensembl)
+transformed_counts_df<-as.data.frame(transformed_counts)
+transformed_counts_df$gene_id=rownames(transformed_counts_df) 
+transformed_counts_df_GO<-merge(transformed_counts_df, ensembl_and_entrez, by.x="gene_id", by.y="ensembl_gene_id", 
+                  all.x=TRUE, all.y=FALSE)
+
+transformed_counts_df_TF <- transformed_counts_df_GO %>% filter(go_id == "GO:0003700")
+write.table(transformed_counts_df_TF, file="transformed_counts_GSE103990_TF.txt", sep="\t", quote=F, col.names=NA)
+write.table(transformed_counts_df_TF$gene_id, file = "TF.txt", sep = "\t", quote = F, col.names = NA)
+
+write.table(transformed_counts_df, file="transformed_counts_GSE103990.txt", sep="\t", quote=F, col.names=NA)
+
+transformed_counts_df <- transformed_counts_df %>% 
+    as_tibble()
+```
+
+### Visualization of DE results - simple design
+
+The number contained in the *stat* column is the *z-score*  and is the result of the ratio between *shrunken LFC estimates* and *standard error of the estimate*. If we specify the `contrast` variable in the formula below, we'll be always sure of what is the fold change referring to.
+```{r, message=FALSE, warning=FALSE}
+contrast <- c("Cell_type","organoid", "tumor")
+res_unshrunken <- results(dds, contrast = contrast, alpha=0.05)
+res_unshrunken
+summary(res_unshrunken)
+```
+
+### Log fold change shrinkage for visualization and ranking
+
+*NOTE: Shrinking the log2 fold changes will not change the total number of genes that are identified as significantly differentially expressed.* The shrinkage of fold change is to help with downstream assessment of results. For example, if you wanted to subset your significant genes based on fold change for further evaluation, you may want to use shruken values. Additionally, for functional analysis tools such as GSEA which require fold change values as input you would want to provide shrunken values.
+
+It is also important to visualize the changes that different LFC estimate produce. For this we use the function `lfcShrink` and we can specify three different estimator options in the `type` argument of the function (`normal`, which is the original DESEq2 shrinkage estimator; `apeglm`, which the adaptive t prior shrinkage estimator from the apeglm package; `ashr`, which is the adaptive shrinkage estimator from the ashr package). The `coef` variable can be a number indicating the position of the comparison in the `resultsNames` object.
+```{r, warning=FALSE, message=FALSE, cache=TRUE}
+resultsNames(dds)
+
+resLFC <- lfcShrink(dds, coef="Cell_type_organoid_vs_tumor", type="apeglm")
+resLFC
+summary(resLFC)
+
+resAsh <- lfcShrink(dds, coef="Cell_type_organoid_vs_tumor", type="ashr")
+resAsh
+
+par(mfrow=c(1,3), mar=c(4,4,2,1))
+xlim <- c(1,1e5); ylim <- c(-3,3)
+plotMA(resLFC, xlim=xlim, ylim=ylim, main="apeglm")
+plotMA(res, xlim=xlim, ylim=ylim, main="normal")
+plotMA(resAsh, xlim=xlim, ylim=ylim, main="ashr")
+```
+
+It is important to understand the content of the result table
+```{r , warning=FALSE, message=FALSE}
+mcols(res_unshrunken, use.names=T)
+mcols(resLFC, use.names=T)
+```
+
+Output the significant results and filtering
+```{r , warning=FALSE, message=FALSE}
+res_tb <- res_unshrunken %>%
+  data.frame() %>%
+  rownames_to_column(var="gene") %>% 
+  as_tibble()
+
+resLFC_tb <- resLFC %>%
+  data.frame() %>%
+  rownames_to_column(var="gene") %>% 
+  as_tibble()
+
+padj.cutoff <- 0.05 # Set thresholds
+lfc.cutoff <- 0.58 # this means an actual FC of 1.5 since we are using log2FC
+
+sig_res <- filter(res_tb, padj < padj.cutoff & abs(log2FoldChange) > lfc.cutoff) # Subset the significant results
+sig_resLFC <- filter(resLFC_tb, padj < padj.cutoff & abs(log2FoldChange) > lfc.cutoff)
+```
+
+###Visualization
+
+Order results by padj values and extract top 20 genes
+```{r , message=FALSE, warning=FALSE}
+top20_sig_res_genes <- res_tb %>% 
+        arrange(padj) %>% 	#Arrange rows by padj values
+        pull(gene) %>% 		#Extract character vector of ordered genes
+        head(n=20) 		#Extract the first 20 genes
+```
+
+Then extract the normalized count values for these 20 genes
+```{r , message=FALSE, warning=FALSE}
+## normalized counts for top 20 significant genes
+top20_sig_res_norm <- normalized_counts_df %>%
+        filter(gene_id %in% top20_sig_res_genes)
+```
+
+Gather the counts corresponding to the genes extracted above
+```{r , message=FALSE, warning=FALSE}
+gathered_top20_sig_res <- top20_sig_res_norm %>%
+  gather(colnames(top20_sig_res_norm)[2:42], key = "samplename", value = "normalized_counts")
+
+View(gathered_top20_sig_res) ## check the column header in the "gathered" data frame
+
+gathered_top20_sig_res <- inner_join(coldata_tibble, gathered_top20_sig_res) ## join with sample information
+```
+
+Plot the top20 DE genes
+```{r , message=FALSE, warning=FALSE}
+ggplot(gathered_top20_sig_res) +
+        geom_point(aes(x = gene_id, y = normalized_counts, color = Cell_type)) +
+        scale_y_log10() +
+        xlab("Genes") +
+        ylab("log10 Normalized Counts") +
+        ggtitle("Top 20 Significant DE Genes") +
+        theme_bw() +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+	theme(plot.title = element_text(hjust = 0.5))
+```
+
+*Heatmap of all the significant genes*: extract normalized expression for significant genes from the organoids and tumor samples, and set the gene column (1) to row names
+```{r , message=FALSE, warning=FALSE}
+sig_res_genes <- sig_res %>% pull(gene)
+all_sig_norm <- normalized_counts_df %>%
+        filter(gene_id %in% sig_res_genes)
+
+### Annotate our heatmap
+annotation <- coldata_tibble %>% 
+	select(samplename, Cell_type, passages) %>% 
+	data.frame(row.names = "samplename")
+
+### Set a color palette
+heat_colors <- brewer.pal(6, "YlOrRd")
+
+### Run pheatmap
+pheatmap(all_sig_norm[,c(2:42)], 
+         color = heat_colors, 
+         cluster_rows = T, 
+         show_rownames = F,
+         annotation_col = annotation, 
+         border_color = NA, 
+         fontsize = 10, 
+         scale = "row", 
+         fontsize_row = 10, 
+         height = 20)
+```
+
+*Heatmap of top 20 significant genes*: extract normalized expression for significant genes from the organoids and tumor samples, and set the gene column (1) to row names
+```{r , message=FALSE, warning=FALSE}
+### Annotate our heatmap
+annotation <- coldata_tibble %>% 
+	select(samplename, Cell_type, passages) %>% 
+	data.frame(row.names = "samplename")
+
+### Set a color palette
+heat_colors <- brewer.pal(6, "YlOrRd")
+
+### Run pheatmap
+pheatmap(top20_sig_res_norm[,c(2:42)], 
+         color = heat_colors, 
+         cluster_rows = T, 
+         show_rownames = F,
+         annotation_col = annotation,
+         annotation_row = NA,
+         border_color = NA, 
+         fontsize = 10, 
+         scale = "row", #this will plot z-score
+         fontsize_row = 10, 
+         height = 20)
+```
+
+*Heatmap of BASE47 classifier*
+```{r , message=FALSE, warning=FALSE}
+BASE47<- read.csv("BASE47.csv", row.names=1)
+BASE47$marker<-as.factor(BASE47$marker)
+levels(BASE47$marker)
+
+BASE47_tibble <- BASE47 %>% 
+  rownames_to_column(var="hgnc_symbol") %>% 
+  as_tibble()
+
+BASE47_genes <- BASE47_tibble %>% pull(hgnc_symbol)
+BASE47_counts_norm <- normalized_counts_df %>%
+        filter(hgnc_symbol %in% BASE47_genes)
+BASE47_counts_norm <- BASE47_counts_norm %>% data.frame(row.names = "hgnc_symbol")
+
+BASE47_genes_detected <- BASE47_counts_norm %>% row.names #run this in case not all genes are there
+BASE47_tibble <- BASE47_tibble %>% filter(hgnc_symbol %in% BASE47_genes_detected)
+#BASE47_df <- merge(BASE47_genes_detected, BASE47_tibble, by = "hgnc_symbol")
+
+### Annotate rows
+annotation_row <- BASE47_tibble %>% 
+	select(hgnc_symbol, marker) %>% 
+	data.frame(row.names = "hgnc_symbol")
+class(annotation_row$marker)
+
+### Set a color palette
+heat_colors <- brewer.pal(9, "YlOrRd")
+
+### Run pheatmap
+pheatmap(BASE47_counts_norm[,c(2:42)], 
+         color = heat_colors, 
+         cluster_rows = T, 
+         show_rownames = T,
+         annotation_col = annotation,
+         annotation_row = annotation_row,
+         border_color = NA, 
+         fontsize = 10, 
+         scale = "row", #this will plot z-score
+         fontsize_row = 7, 
+         height = 20,
+         angle_col = 90)
+```
+
+*Heatmap of GSC classifier*
+```{r , message=FALSE, warning=FALSE}
+GSC<- read.csv("GSC.csv", row.names=1)
+GSC
+GSC$X<-NULL
+GSC$GSC.Class<-as.factor(GSC$GSC.Class)
+levels(GSC$GSC.Class)
+
+GSC_tibble <- GSC %>% 
+  rownames_to_column(var="hgnc_symbol") %>% 
+  as_tibble()
+
+GSC_genes <- GSC_tibble %>% pull(hgnc_symbol)
+GSC_counts_norm <- normalized_counts_df %>%
+        filter(hgnc_symbol %in% GSC_genes)
+GSC_counts_norm <- GSC_counts_norm %>% data.frame(row.names = "hgnc_symbol")
+
+GSC_genes_detected <- GSC_counts_norm %>% row.names #run this in case not all genes are there
+GSC_tibble <- GSC_tibble %>% filter(hgnc_symbol %in% GSC_genes_detected)
+#BASE47_df <- merge(BASE47_genes_detected, BASE47_tibble, by = "hgnc_symbol")
+
+### Annotate rows
+annotation_row <- GSC_tibble %>% 
+	select(hgnc_symbol, GSC.Class) %>% 
+	data.frame(row.names = "hgnc_symbol")
+class(annotation_row$GSC.Class)
+
+### Set a color palette
+heat_colors <- brewer.pal(9, "YlOrRd")
+
+### Run pheatmap
+pheatmap(GSC_counts_norm[,c(2:42)], 
+         color = heat_colors, 
+         cluster_rows = T, 
+         show_rownames = T,
+         treeheight_row = 20,
+         treeheight_col = 20,
+         annotation_col = annotation,
+         annotation_row = annotation_row,
+         border_color = NA, 
+         fontsize = 10, 
+         scale = "row", #this will plot z-score
+         fontsize_row = 5, 
+         height = 20,
+         angle_col = 90)
+```
+
+###Multifactor design
+
+First we can create a copy of the DESeqDataSet so that we can re-run the analysis by specifying a multi-factor design. Then we assign the new design and keep the variable `Cell_type` as last in the sequence so that *when we call `results`* the comparison will take into account the sequencing method used (paired VS single-end) *but* the log2 fold change and the Wald test p-value will be for last variable in the design formula.
+
+*IMPORTANT*: if the design formula is a factor, the comparison will be the last level of this variable over the reference level (see previous note on factor levels). However, the order of the variables of the design do not matter so long as the user specifies the comparison to build a results table for, using the *name* or *contrast* arguments of results.
+```{r, warning=FALSE, message=FALSE}
+ddsMF <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ LibraryLayout + Cell_type + LibraryLayout:Cell_type)
+ddsMF
+```
+
+Check functions applied
+```{r, warning=FALSE, message=FALSE, cache=TRUE}
+sizeFactors(ddsMF) ## Check the size factors
+colSums(counts(ddsMF)) ## Total number of raw counts per sample
+colSums(counts(ddsMF, normalized=T)) ## Total number of normalized counts per sample
+plotDispEsts(ddsMF) ## Plot dispersion estimates
+```
+
+Run DESeq with LRT 
+```{r, warning=FALSE, message=FALSE, cache=TRUE}
+
+```
+
+
+Access the results
+resMF <- results(ddsMF)
+head(resMF)
+
+
+###Visualization of vulcano plot
+
+To visualize statistical significance VS fold-change we can make a vulcano plot and for this we use the package *EnhancedVolcano*.
+```{r, warning=FALSE, message=FALSE}
+EnhancedVolcano(res,
+        lab = rownames(res),
+        x = "log2FoldChange",
+        y = "pvalue",
+        title = "Primary PCa pre- VS post-met",
+        subtitle= "res",
+        FCcutoff = 1.5
+        )
+
+EnhancedVolcano(resLFC,
+        lab = rownames(resLFC),
+        x = "log2FoldChange",
+        y = "pvalue",
+        title = "Primary PCa pre- VS post-met",
+        subtitle= "resLFC",
+        FCcutoff = 1.5)
+  
+EnhancedVolcano(resAsh,
+        lab = rownames(resAsh),
+        x = "log2FoldChange",
+        y = "pvalue",
+        title = "Primary PCa pre- VS post-met",
+        subtitle= "resAsh",
+        FCcutoff = 1.5)
+```
+
+##GO and pathway enrichment analysis
+
+###ClusterProfiler
+
+We use the *biomaRt* package which allows us to select a *BioMart* database and dataset to use. By using the function `listDatasets`and `listAttributes` we can see the list of available databases and datasets from which we can choose.
+
+Should compare this with the Shrunken results (`res` VS `resLFC` for example)
+
+```{r, message=FALSE, warning=FALSE}
+ensembl=useMart("ENSEMBL_MART_ENSEMBL")
+listDatasets(ensembl)
+ensembl=useDataset("mmusculus_gene_ensembl",mart=ensembl)
+listAttributes(ensembl)
+ensembl_and_entrez=getBM(attributes=c("ensembl_gene_id", "entrezgene_id"),values=rownames(res), mart= ensembl)
+res<-as.data.frame(res)
+
+res$gene_id=rownames(res) 
+res<-merge(res, ensembl_and_entrez, by.x="gene_id", by.y="ensembl_gene_id", 
+                  all.x=TRUE, all.y=FALSE)
+names(res)
+diff_expressed_genes<-res$entrezgene_id[which(res$padj< 0.05)]
+```
+
+First we can do *GO over-representation* test by using the `enrichGO` function. See vignette from *ClusterProfiler* for details.
+```{r, message=FALSE, warning=FALSE}
+OrgDb<- org.Mm.eg.db
+BP.genelist.enrichGO <- enrichGO(gene = diff_expressed_genes ,OrgDb  = OrgDb, ont = "BP", pAdjustMethod = "BH",pvalueCutoff  = 0.05)
+
+MF.genelist.enrichGO <- enrichGO(gene = diff_expressed_genes ,OrgDb  = OrgDb, ont = "MF", pAdjustMethod = "BH",pvalueCutoff  = 0.05)
+
+CC.genelist.enrichGO <- enrichGO(gene = diff_expressed_genes ,OrgDb  = OrgDb, ont = "CC", pAdjustMethod = "BH",pvalueCutoff  = 0.05)
+```
+
+We can save the data for all the objects just generated.
+```{r, message=FALSE, warning=FALSE}
+#write.table(data.frame(BP.genelist.enrichGO), "BP.genelist.enrichGO.txt", sep="\t", quote=FALSE, row.names=TRUE)
+```
+
+And we can represent the data.
+```{r, message=FALSE, warning=FALSE}
+barplot(BP.genelist.enrichGO, showCategory=20, main = "Biological Processes")
+barplot(MF.genelist.enrichGO, showCategory=20, main = "Molecular Functions")
+barplot(CC.genelist.enrichGO, showCategory=20, main = "Cellular Compartments")
+```
+
+Then we can also do KEGG GSEA by using `gseKEGG` function.
+```{r, message=FALSE, warning=FALSE}
+geneList = res$log2FoldChange
+names(geneList) = as.character(res$entrezgene_id)
+geneList = sort(geneList, decreasing = TRUE)
+minGSSize    = 10
+
+kk2 <- gseKEGG(geneList = geneList,
+               organism     = 'mmu',
+               nPerm        = 1000,
+               minGSSize    = 10,
+               pvalueCutoff = 0.1,
+               verbose      = FALSE)
+as.data.frame(kk2)[,-8]
+```
+
+##Session information
+Basic information related to the R session can be retrieved here.
+```{r}
+sessionInfo()
+```
