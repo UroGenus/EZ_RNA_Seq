@@ -13,7 +13,7 @@ The data processing described here was done on the HPC cluster [**ubelix**](http
 As example to assemble and test an RNA-Seq workflow we will use previously published data from an RNA-Seq experiment conducted on primary tumor samples and organoids of bladder cancer. The data are accessible on GEO [**here**](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE103990).
 
 ## Table of contents
-1. [**Download raw data**](https://github.com/eugeniozoni/RNA_Seq/wiki/Download-the-raw-data)
+1. [**Download raw data**](https://github.com/eugeniozoni/RNA_Seq/wiki/Download-raw-data)
 2. [**Steps for data processing**](https://github.com/eugeniozoni/RNA_Seq/wiki/Steps-for-data-processing)
 3. [**Differential expression analysis**]()
  
